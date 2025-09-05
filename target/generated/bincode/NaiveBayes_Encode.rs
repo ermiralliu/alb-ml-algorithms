@@ -6,11 +6,7 @@ impl :: bincode :: Encode for NaiveBayes
     {
         :: bincode :: Encode :: encode(&self.class_log_priors, encoder) ?; ::
         bincode :: Encode :: encode(&self.class_log_likelihoods, encoder) ?;
-        :: bincode :: Encode :: encode(&self.doc_counts, encoder) ?; ::
-        bincode :: Encode :: encode(&self.word_counts, encoder) ?; :: bincode
-        :: Encode :: encode(&self.vocabulary_size, encoder) ?; :: bincode ::
-        Encode :: encode(&self.class_word_frequencies, encoder) ?; :: bincode
-        :: Encode :: encode(&self.total_docs_processed, encoder) ?; core ::
-        result :: Result :: Ok(())
+        :: bincode :: Encode :: encode(&self.vocabulary_size, encoder) ?; core
+        :: result :: Result :: Ok(())
     }
 }

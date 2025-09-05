@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::File;
 
-use std::io::{Write, Read};
+use std::io::{Write};
 // A custom struct to store a class and its calculated score.
 // We implement `PartialOrd` and `Ord` to allow `BinaryHeap` to order
 // elements from highest score to lowest.
@@ -42,7 +42,7 @@ impl Ord for ScoredClass {
 // The NaiveBayes model struct. It holds the learned parameters after training.
 
 #[derive(Debug, Serialize, Deserialize, Encode, Decode)]
-pub struct NaiveBayes {
+pub struct NaiveBayesIncremental {
     // Stores the log probability of each class occurring.
     // Example: ln(P(class="Sports"))
     class_log_priors: std::collections::HashMap<u16, f64>,
@@ -52,7 +52,20 @@ pub struct NaiveBayes {
     // by the word's position in the vocabulary.
     // Example: ln(P(word="ball" | class="Sports"))
     class_log_likelihoods: std::collections::HashMap<u16, Vec<f64>>,
+    
+    // Total number of documents in each class.
+    doc_counts: Vec<u64>,
+    
+    // Total number of words in each class.
+    word_counts: Vec<u64>,
+    
+    // The size of the vocabulary.
     vocabulary_size: usize,
+    
+    // Internal state for incremental training.
+    class_word_frequencies: Vec<Vec<u64>>,
+    total_docs_processed: u64,
+    num_classes: usize,
 }
 
 // configurations
@@ -61,20 +74,27 @@ const MAX_PREDICTIONS: usize = 5;
 
 // We implement the MachineLearningModel trait for our NaiveBayes struct.
 // The input is a vector of word counts (features), and the output is a class ID (u32).
-impl MachineLearningModel<Vec<u16>, u16> for NaiveBayes {
+impl MachineLearningModel<Vec<u16>, u16> for NaiveBayesIncremental {
     /// Creates a new, uninitialized instance of the model.
     fn new() -> Self {
-        NaiveBayes {
+        NaiveBayesIncremental {
             class_log_priors: std::collections::HashMap::new(),
             class_log_likelihoods: std::collections::HashMap::new(),
-            vocabulary_size: 0
+            doc_counts: Vec::new(),
+            word_counts: Vec::new(),
+            vocabulary_size: 0,
+            class_word_frequencies: Vec::new(),
+            total_docs_processed: 0,
+            num_classes: 0,
         }
     }
 
     /// The `fit` method for training the model on text data.
     /// It now correctly accepts a slice of `u32` labels.
     /// 
-    fn fit(&mut self, data: &[Vec<u16>], labels: &[u16]) -> Result<(), String> {
+    
+    fn fit(&mut self, data: &[Vec<u16>], labels: &[u16]) -> Result< (), String> {
+      // this is an incremental fit, so you can call it multiple times
         if data.len() != labels.len() {
             return Err("Data and labels must have same length".to_string());
         }
@@ -82,61 +102,38 @@ impl MachineLearningModel<Vec<u16>, u16> for NaiveBayes {
             return Err("Cannot train on empty data".to_string());
         }
 
-        let total_docs_processed = data.len() as u64;
+        // Find the number of features (vocabulary size).
+        if let Some(first_doc) = data.get(0) {
+            self.vocabulary_size = first_doc.len();
+        } else {
+            // Handle empty data case.
+            return Ok(());
+        }
 
-        // Find the number of features (vocabulary size) and the number of classes.
-        let vocabulary_size = data[0].len();
-        let num_classes = (*labels.iter().max().unwrap_or(&0) + 1) as usize;
-        self.vocabulary_size = vocabulary_size;
-
-        // Create temporary matrices for counts.
-        let mut doc_counts = vec![0; num_classes];
-        let mut word_counts = vec![0; num_classes];
-        let mut class_word_frequencies = vec![vec![0; vocabulary_size]; num_classes];
+        // Find the max label to properly size our vectors.
+        let max_label = *labels.iter().max().unwrap() as usize;
+        if max_label >= self.num_classes {
+            let new_size = max_label + 1;
+            self.doc_counts.resize(new_size, 0);
+            self.word_counts.resize(new_size, 0);
+            self.class_word_frequencies.resize(new_size, vec![0; self.vocabulary_size]);
+            self.num_classes = new_size;
+        }
 
         // 1. Count word and document occurrences for each class.
-        for (i, doc_counts_row) in data.iter().enumerate() {
+        self.total_docs_processed += data.len() as u64;
+
+        for (i, doc_counts) in data.iter().enumerate() {
             let label = labels[i] as usize;
-            
+
             // Increment document count for the class.
-            doc_counts[label] += 1;
+            self.doc_counts[label] += 1;
 
             // Increment word counts for the class.
-            for (word_index, &count) in doc_counts_row.iter().enumerate() {
-                class_word_frequencies[label][word_index] += count as u64;
-                word_counts[label] += count as u64;
+            for (word_index, &count) in doc_counts.iter().enumerate() {
+                self.class_word_frequencies[label][word_index] += count as u64;
+                self.word_counts[label] += count as u64;
             }
-        }
-        
-        // 2. Finalize training by calculating the log probabilities.
-        let alpha = ALPHA; // Laplace smoothing alpha value
-        for class in 0..num_classes {
-            // Check if this class has data
-            if doc_counts[class] == 0 {
-                continue;
-            }
-
-            // Calculate log prior: ln(P(class))
-            let doc_count = doc_counts[class];
-            let log_prior = (doc_count as f64 / total_docs_processed as f64).ln();
-            self.class_log_priors.insert(class as u16, log_prior);
-
-            // Calculate word likelihoods: P(word | class)
-            let total_words_in_class = word_counts[class] as f64;
-            let mut log_likelihoods_vec = vec![0.0; vocabulary_size];
-
-            let class_word_freqs = &class_word_frequencies[class];
-
-            for i in 0..vocabulary_size {
-                // Apply Laplace smoothing to prevent zero probabilities.
-                let word_count = class_word_freqs[i] as f64;
-                let numerator = word_count + alpha;
-                let denominator = total_words_in_class + alpha * (vocabulary_size as f64);
-                
-                log_likelihoods_vec[i] = (numerator / denominator).ln();
-            }
-            self.class_log_likelihoods
-                .insert(class as u16, log_likelihoods_vec);
         }
         Ok(())
     }
@@ -208,42 +205,45 @@ impl MachineLearningModel<Vec<u16>, u16> for NaiveBayes {
 }
 
 
-impl NaiveBayes {
-    /// Saves the trained model to a file using bincode 2.0 for serialization.
-    pub fn save_to_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Create the bincode configuration
-        let config = bincode::config::standard();
-        
-        // Serialize the model
-        let encoded = bincode::encode_to_vec(self, config)?;
-        
-        // Write to file
-        let mut file = File::create(path)?;
-        file.write_all(&encoded)?;
-        file.flush()?; // Ensure data is written to disk
-        
-        Ok(())
-    }
+impl NaiveBayesIncremental {
+    // This public method finalizes the training by calculating the log probabilities
+    // after all data has been incrementally passed to the `fit` method.
+    // this doesn't remove the training data, so you can easily train it more later, and make it even stronger.
+    pub fn finalize_training(&mut self) {
+        let alpha = ALPHA; // Laplace smoothing alpha value
+        for class in 0..self.num_classes {
+            // Check if this class has data
+            if self.doc_counts[class] == 0 {
+                continue;
+            }
 
-    /// Loads a trained model from a file using bincode 2.0 for deserialization.
-    pub fn load_from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        // Read file contents
-        let mut file = File::open(path)?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)?;
-        
-        // Create the bincode configuration
-        let config = bincode::config::standard();
-        
-        // Deserialize the model
-        let (model, _len): (Self, usize) = bincode::decode_from_slice(&buffer, config)?;
-        
-        Ok(model)
+            // Calculate log prior: ln(P(class))
+            let doc_count = self.doc_counts[class];
+            let log_prior = (doc_count as f64 / self.total_docs_processed as f64).ln();
+            self.class_log_priors.insert(class as u16, log_prior);
+
+            // Calculate word likelihoods: P(word | class)
+            let total_words_in_class = self.word_counts[class] as f64;
+            let mut log_likelihoods_vec = vec![0.0; self.vocabulary_size];
+
+            let class_word_freqs = &self.class_word_frequencies[class];
+
+            for i in 0..self.vocabulary_size {
+                // Apply Laplace smoothing to prevent zero probabilities.
+                let word_count = class_word_freqs[i] as f64;
+                let numerator = word_count + alpha;
+                let denominator = total_words_in_class + alpha * (self.vocabulary_size as f64);
+                
+                log_likelihoods_vec[i] = (numerator / denominator).ln();
+            }
+            self.class_log_likelihoods
+                .insert(class as u16, log_likelihoods_vec);
+        }
     }
 }
 
 // Alternative implementation using references for better memory efficiency
-impl NaiveBayes {
+impl NaiveBayesIncremental {
     /// Alternative save method that works with borrowed data
     pub fn save_to_file_alt(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut file = File::create(path)?;

@@ -1,0 +1,17 @@
+impl :: bincode :: Encode for NaiveBayesIncremental
+{
+    fn encode < __E : :: bincode :: enc :: Encoder >
+    (& self, encoder : & mut __E) ->core :: result :: Result < (), :: bincode
+    :: error :: EncodeError >
+    {
+        :: bincode :: Encode :: encode(&self.class_log_priors, encoder) ?; ::
+        bincode :: Encode :: encode(&self.class_log_likelihoods, encoder) ?;
+        :: bincode :: Encode :: encode(&self.doc_counts, encoder) ?; ::
+        bincode :: Encode :: encode(&self.word_counts, encoder) ?; :: bincode
+        :: Encode :: encode(&self.vocabulary_size, encoder) ?; :: bincode ::
+        Encode :: encode(&self.class_word_frequencies, encoder) ?; :: bincode
+        :: Encode :: encode(&self.total_docs_processed, encoder) ?; :: bincode
+        :: Encode :: encode(&self.num_classes, encoder) ?; core :: result ::
+        Result :: Ok(())
+    }
+}
