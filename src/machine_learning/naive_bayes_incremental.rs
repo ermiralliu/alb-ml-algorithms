@@ -4,9 +4,7 @@ use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::fs::File;
 
-use std::io::{Write};
 // A custom struct to store a class and its calculated score.
 // We implement `PartialOrd` and `Ord` to allow `BinaryHeap` to order
 // elements from highest score to lowest.
@@ -74,7 +72,7 @@ const MAX_PREDICTIONS: usize = 5;
 
 // We implement the MachineLearningModel trait for our NaiveBayes struct.
 // The input is a vector of word counts (features), and the output is a class ID (u32).
-impl MachineLearningModel<Vec<u16>, u16> for NaiveBayesIncremental {
+impl MachineLearningModel<u16, u16> for NaiveBayesIncremental {
     /// Creates a new, uninitialized instance of the model.
     fn new() -> Self {
         NaiveBayesIncremental {
@@ -91,10 +89,9 @@ impl MachineLearningModel<Vec<u16>, u16> for NaiveBayesIncremental {
 
     /// The `fit` method for training the model on text data.
     /// It now correctly accepts a slice of `u32` labels.
-    /// 
-    
-    fn fit(&mut self, data: &[Vec<u16>], labels: &[u16]) -> Result< (), String> {
-      // this is an incremental fit, so you can call it multiple times
+/// The `train` method for training the model on text data.
+    /// This is an incremental fit, so you can call it multiple times.
+    fn train(&mut self, data: &[Vec<u16>], labels: &[Vec<u16>]) -> Result<(), String> {
         if data.len() != labels.len() {
             return Err("Data and labels must have same length".to_string());
         }
@@ -102,72 +99,82 @@ impl MachineLearningModel<Vec<u16>, u16> for NaiveBayesIncremental {
             return Err("Cannot train on empty data".to_string());
         }
 
-        // Find the number of features (vocabulary size).
-        if let Some(first_doc) = data.get(0) {
-            self.vocabulary_size = first_doc.len();
-        } else {
-            // Handle empty data case.
-            return Ok(());
+        // Initialize vocabulary size if it hasn't been set.
+        if self.vocabulary_size == 0 {
+            self.vocabulary_size = data[0].len();
         }
 
-        // Find the max label to properly size our vectors.
-        let max_label = *labels.iter().max().unwrap() as usize;
-        if max_label >= self.num_classes {
-            let new_size = max_label + 1;
-            self.doc_counts.resize(new_size, 0);
-            self.word_counts.resize(new_size, 0);
-            self.class_word_frequencies.resize(new_size, vec![0; self.vocabulary_size]);
-            self.num_classes = new_size;
-        }
-
-        // 1. Count word and document occurrences for each class.
-        self.total_docs_processed += data.len() as u64;
-
-        for (i, doc_counts) in data.iter().enumerate() {
-            let label = labels[i] as usize;
-
-            // Increment document count for the class.
-            self.doc_counts[label] += 1;
-
-            // Increment word counts for the class.
-            for (word_index, &count) in doc_counts.iter().enumerate() {
-                self.class_word_frequencies[label][word_index] += count as u64;
-                self.word_counts[label] += count as u64;
+        // Find all unique classes from the new labels and update `num_classes`.
+        let mut all_new_classes = std::collections::HashSet::new();
+        for doc_labels in labels.iter() {
+            for &label in doc_labels {
+                all_new_classes.insert(label);
             }
         }
+        let max_new_label = all_new_classes.iter().max().unwrap_or(&0) + 1;
+        if max_new_label as usize > self.num_classes {
+            self.num_classes = max_new_label as usize;
+            self.doc_counts.resize(self.num_classes, 0);
+            self.word_counts.resize(self.num_classes, 0);
+            self.class_word_frequencies.resize(self.num_classes, vec![0; self.vocabulary_size]);
+        }
+
+        // Accumulate word and document occurrences for each class.
+        self.total_docs_processed += data.len() as u64;
+        for (i, doc_counts_row) in data.iter().enumerate() {
+            let doc_labels = &labels[i];
+            
+            // For multi-label, we iterate over all labels for the current document.
+            for &label in doc_labels {
+                let class_index = label as usize;
+                
+                // Increment document count for the class.
+                self.doc_counts[class_index] += 1;
+
+                // Increment word counts for the class.
+                for (word_index, &count) in doc_counts_row.iter().enumerate() {
+                    self.class_word_frequencies[class_index][word_index] += count as u64;
+                    self.word_counts[class_index] += count as u64;
+                }
+            }
+        }
+        
+        // Finalize training by calculating the log probabilities after all data is trained
+        self.finalize();
+
         Ok(())
     }
 
     /// The `predict` method for making a prediction on a single document.
     /// It now returns a vector of class IDs that meet a certain accuracy threshold.
-    fn predict(&self, data_point: &Vec<u16>) -> u16 {
-        let mut best_class = 0_u16;
-        let mut max_posterior = f64::NEG_INFINITY;
+    // fn predict(&self, data_point: &Vec<u16>) -> Vec<u16> {
+    //     let mut best_class = 0_u16;
+    //     let mut max_posterior = f64::NEG_INFINITY;
 
-        // Iterate through each class to calculate the posterior probability
-        for (&class, &log_prior) in &self.class_log_priors {
-            let mut log_posterior = log_prior;
+    //     // Iterate through each class to calculate the posterior probability
+    //     for (&class, &log_prior) in &self.class_log_priors {
+    //         let mut log_posterior = log_prior;
 
-            // Calculate the log likelihood for the document's words
-            if let Some(log_likelihoods) = self.class_log_likelihoods.get(&class) {
-                for (i, &word_count) in data_point.iter().enumerate() {
-                    // We add the log probability for each occurrence of the word.
-                    log_posterior += word_count as f64 * log_likelihoods[i];
-                }
-            }
+    //         // Calculate the log likelihood for the document's words
+    //         if let Some(log_likelihoods) = self.class_log_likelihoods.get(&class) {
+    //             for (i, &word_count) in data_point.iter().enumerate() {
+    //                 // We add the log probability for each occurrence of the word.
+    //                 log_posterior += word_count as f64 * log_likelihoods[i];
+    //             }
+    //         }
 
-            // Check if this class has the highest posterior probability so far.
-            if log_posterior > max_posterior {
-                max_posterior = log_posterior;
-                best_class = class;
-            }
-        }
+    //         // Check if this class has the highest posterior probability so far.
+    //         if log_posterior > max_posterior {
+    //             max_posterior = log_posterior;
+    //             best_class = class;
+    //         }
+    //     }
 
-        best_class
-    }
+    //     best_class
+    // }
 
-    /// This new function returns multiple categories based on a relative accuracy threshold.
-    fn predict_multi(&self, data_point: &Vec<u16>) -> Vec<u16> {
+    // This new function returns multiple categories based on a relative accuracy threshold.
+    fn predict(&self, data_point: &Vec<u16>) -> Vec<u16> {
         // Use a BinaryHeap to efficiently find the top-scoring classes.
         // It's a min-heap, so we will store tuples to sort by score.
         let mut top_classes = BinaryHeap::new();
@@ -209,7 +216,7 @@ impl NaiveBayesIncremental {
     // This public method finalizes the training by calculating the log probabilities
     // after all data has been incrementally passed to the `fit` method.
     // this doesn't remove the training data, so you can easily train it more later, and make it even stronger.
-    pub fn finalize_training(&mut self) {
+    fn finalize(&mut self) {
         let alpha = ALPHA; // Laplace smoothing alpha value
         for class in 0..self.num_classes {
             // Check if this class has data
@@ -239,31 +246,5 @@ impl NaiveBayesIncremental {
             self.class_log_likelihoods
                 .insert(class as u16, log_likelihoods_vec);
         }
-    }
-}
-
-// Alternative implementation using references for better memory efficiency
-impl NaiveBayesIncremental {
-    /// Alternative save method that works with borrowed data
-    pub fn save_to_file_alt(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut file = File::create(path)?;
-        let config = bincode::config::standard();
-        
-        // Encode directly to the writer for better memory efficiency
-        bincode::encode_into_std_write(self, &mut file, config)?;
-        file.flush()?;
-        
-        Ok(())
-    }
-
-    /// Alternative load method using a reader
-    pub fn load_from_file_alt(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut file = File::open(path)?;
-        let config = bincode::config::standard();
-        
-        // Decode directly from the reader
-        let model: Self = bincode::decode_from_std_read(&mut file, config)?;
-        
-        Ok(model)
     }
 }

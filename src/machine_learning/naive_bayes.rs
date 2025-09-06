@@ -61,7 +61,7 @@ const MAX_PREDICTIONS: usize = 5;
 
 // We implement the MachineLearningModel trait for our NaiveBayes struct.
 // The input is a vector of word counts (features), and the output is a class ID (u32).
-impl MachineLearningModel<Vec<u16>, u16> for NaiveBayes {
+impl MachineLearningModel<u16, u16> for NaiveBayes {
     /// Creates a new, uninitialized instance of the model.
     fn new() -> Self {
         NaiveBayes {
@@ -72,9 +72,9 @@ impl MachineLearningModel<Vec<u16>, u16> for NaiveBayes {
     }
 
     /// The `fit` method for training the model on text data.
-    /// It now correctly accepts a slice of `u32` labels.
+    /// It now correctly accepts a slice of `u16` labels.
     /// 
-    fn fit(&mut self, data: &[Vec<u16>], labels: &[u16]) -> Result<(), String> {
+    fn train(&mut self, data: &[Vec<u16>], labels: &[Vec<u16>]) -> Result<(), String> {
         if data.len() != labels.len() {
             return Err("Data and labels must have same length".to_string());
         }
@@ -86,8 +86,16 @@ impl MachineLearningModel<Vec<u16>, u16> for NaiveBayes {
 
         // Find the number of features (vocabulary size) and the number of classes.
         let vocabulary_size = data[0].len();
-        let num_classes = (*labels.iter().max().unwrap_or(&0) + 1) as usize;
         self.vocabulary_size = vocabulary_size;
+
+        // Find all unique classes from the labels to determine num_classes.
+        let mut all_classes = std::collections::HashSet::new();
+        for doc_labels in labels.iter() {
+            for &label in doc_labels {
+                all_classes.insert(label);
+            }
+        }
+        let num_classes = (all_classes.iter().max().unwrap_or(&0) + 1) as usize;
 
         // Create temporary matrices for counts.
         let mut doc_counts = vec![0; num_classes];
@@ -96,15 +104,20 @@ impl MachineLearningModel<Vec<u16>, u16> for NaiveBayes {
 
         // 1. Count word and document occurrences for each class.
         for (i, doc_counts_row) in data.iter().enumerate() {
-            let label = labels[i] as usize;
+            let doc_labels = &labels[i];
             
-            // Increment document count for the class.
-            doc_counts[label] += 1;
+            // For multi-label, we iterate over all labels for the current document.
+            for &label in doc_labels {
+                let class_index = label as usize;
+                
+                // Increment document count for the class.
+                doc_counts[class_index] += 1;
 
-            // Increment word counts for the class.
-            for (word_index, &count) in doc_counts_row.iter().enumerate() {
-                class_word_frequencies[label][word_index] += count as u64;
-                word_counts[label] += count as u64;
+                // Increment word counts for the class.
+                for (word_index, &count) in doc_counts_row.iter().enumerate() {
+                    class_word_frequencies[class_index][word_index] += count as u64;
+                    word_counts[class_index] += count as u64;
+                }
             }
         }
         
@@ -142,35 +155,35 @@ impl MachineLearningModel<Vec<u16>, u16> for NaiveBayes {
     }
 
     /// The `predict` method for making a prediction on a single document.
-    /// It now returns a vector of class IDs that meet a certain accuracy threshold.
-    fn predict(&self, data_point: &Vec<u16>) -> u16 {
-        let mut best_class = 0_u16;
-        let mut max_posterior = f64::NEG_INFINITY;
+    // /// It now returns a vector of class IDs that meet a certain accuracy threshold.
+    // fn predict(&self, data_point: &Vec<u16>) -> Vec<u16> {
+    //     let mut best_class = 0_u16;
+    //     let mut max_posterior = f64::NEG_INFINITY;
 
-        // Iterate through each class to calculate the posterior probability
-        for (&class, &log_prior) in &self.class_log_priors {
-            let mut log_posterior = log_prior;
+    //     // Iterate through each class to calculate the posterior probability
+    //     for (&class, &log_prior) in &self.class_log_priors {
+    //         let mut log_posterior = log_prior;
 
-            // Calculate the log likelihood for the document's words
-            if let Some(log_likelihoods) = self.class_log_likelihoods.get(&class) {
-                for (i, &word_count) in data_point.iter().enumerate() {
-                    // We add the log probability for each occurrence of the word.
-                    log_posterior += word_count as f64 * log_likelihoods[i];
-                }
-            }
+    //         // Calculate the log likelihood for the document's words
+    //         if let Some(log_likelihoods) = self.class_log_likelihoods.get(&class) {
+    //             for (i, &word_count) in data_point.iter().enumerate() {
+    //                 // We add the log probability for each occurrence of the word.
+    //                 log_posterior += word_count as f64 * log_likelihoods[i];
+    //             }
+    //         }
 
-            // Check if this class has the highest posterior probability so far.
-            if log_posterior > max_posterior {
-                max_posterior = log_posterior;
-                best_class = class;
-            }
-        }
+    //         // Check if this class has the highest posterior probability so far.
+    //         if log_posterior > max_posterior {
+    //             max_posterior = log_posterior;
+    //             best_class = class;
+    //         }
+    //     }
 
-        best_class
-    }
+    //     best_class
+    // }
 
     /// This new function returns multiple categories based on a relative accuracy threshold.
-    fn predict_multi(&self, data_point: &Vec<u16>) -> Vec<u16> {
+    fn predict(&self, data_point: &Vec<u16>) -> Vec<u16> {
         // Use a BinaryHeap to efficiently find the top-scoring classes.
         // It's a min-heap, so we will store tuples to sort by score.
         let mut top_classes = BinaryHeap::new();
@@ -207,7 +220,6 @@ impl MachineLearningModel<Vec<u16>, u16> for NaiveBayes {
     }
 }
 
-
 impl NaiveBayes {
     /// Saves the trained model to a file using bincode 2.0 for serialization.
     pub fn save_to_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -243,9 +255,9 @@ impl NaiveBayes {
 }
 
 // Alternative implementation using references for better memory efficiency
-impl NaiveBayes {
+impl super::SaveAndLoad<NaiveBayes> for NaiveBayes {
     /// Alternative save method that works with borrowed data
-    pub fn save_to_file_alt(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn save_to_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut file = File::create(path)?;
         let config = bincode::config::standard();
         
@@ -257,7 +269,7 @@ impl NaiveBayes {
     }
 
     /// Alternative load method using a reader
-    pub fn load_from_file_alt(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    fn load_from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let mut file = File::open(path)?;
         let config = bincode::config::standard();
         
