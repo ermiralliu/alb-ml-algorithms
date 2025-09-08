@@ -5,6 +5,7 @@
 pub mod naive_bayes;
 pub mod naive_bayes_incremental;
 pub mod k_nearest_neighbors;
+pub mod convolutional_neural_networks;
 
 pub trait MachineLearningModel<I, O> {
     /// A function to create a new, uninitialized instance of the model.
