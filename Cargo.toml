@@ -7,3 +7,7 @@ edition = "2024"
 serde = { version = "1.0", features = ["derive"] }
 bincode = { version = "2.0", features = ["serde"] }
 rand = "0.9.2"
+rkyv = { version = "0.8.15", features = ["bytecheck"] } 
+rustc-hash = "2.1.1"
+ordered-float = "5.1.0"
+rayon = "1.11.0"
