@@ -11,3 +11,4 @@ rkyv = { version = "0.8.15", features = ["bytecheck"] }
 rustc-hash = "2.1.1"
 ordered-float = "5.1.0"
 rayon = "1.11.0"
+fst = "0.4.7"

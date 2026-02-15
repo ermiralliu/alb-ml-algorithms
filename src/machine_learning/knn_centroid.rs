@@ -1,7 +1,8 @@
-use ordered_float::OrderedFloat;
+use ordered_float::{Float, OrderedFloat};
 use rayon::prelude::*;
-use rustc_hash::FxBuildHasher;
 use std::collections::{BinaryHeap, HashMap};
+
+use rustc_hash::FxBuildHasher;
 
 pub trait EuclideanDistance<Other> {
   fn euclidean_distance(&self, other: &Other) -> f64;
@@ -36,6 +37,9 @@ impl EuclideanDistance<SparseVector> for SparseVector {
 fn dot_product(b: &SparseVector, a: &SparseVector, a_magnitude: f32) -> f64 {
   let mut dot = 0;
   let b_magnitude: f64 = b.values().map(|val| val.pow(2) as f64).sum();
+  if a_magnitude == 0.0 || b_magnitude == 0.0 {
+    return 0.0;
+  }
   let b_magnitude = b_magnitude.sqrt();
   for (word_id, val_a) in a {
     if let Some(val_b) = b.get(word_id) {
@@ -47,13 +51,43 @@ fn dot_product(b: &SparseVector, a: &SparseVector, a_magnitude: f32) -> f64 {
   (dot as f64) / (b_magnitude * a_magnitude as f64)
 }
 
+pub fn cosine_similarity_full(
+    a: &SparseVector, 
+    b: &SparseVector, 
+) -> f64 {
+    let mag_a: u64 = a.values().map(|x| (*x as u64).pow(2)).sum();
+    let mag_a = (mag_a as f64).sqrt();
+    let mag_b: u64 = b.values().map(|x| (*x as u64).pow(2)).sum();
+    let mag_b = (mag_b as f64).sqrt();
+
+    if mag_a == 0.0 || mag_b == 0.0 {
+        return 0.0;
+    }
+
+    // Optimization: Iterate over the vector with fewer non-zero elements
+    let (small, large) = if a.len() < b.len() { (a, b) } else { (b, a) };
+
+    let dot_product: f64 = small
+        .iter()
+        .filter_map(|(key, &val_a)| {
+            large.get(key).map(|&val_b| (val_a as f64) * (val_b as f64))
+        })
+        .sum();
+
+    // The Cosine Similarity formula: (A · B) / (||A|| * ||B||)
+    dot_product / (mag_a * mag_b)
+}
+
 pub struct KNearestNeighbors {
   k: usize,
   // I is now fixed as FxHashMap<u16, u16>
   training_data: Vec<SparseVector>,
   training_labels: Vec<Vec<u16>>,
   normalized_magnitudes: Vec<f32>,
+  centroids: Vec<SparseVector>,
+  buckets: Vec<Vec<usize>>,
 }
+
 impl KNearestNeighbors {
   pub fn new_with_k(k: usize) -> Self {
     Self {
@@ -61,6 +95,8 @@ impl KNearestNeighbors {
       training_data: Vec::new(),
       training_labels: Vec::new(),
       normalized_magnitudes: Vec::new(),
+      centroids: Vec::new(),
+      buckets: Vec::new(),
     }
   }
 
@@ -78,7 +114,51 @@ impl KNearestNeighbors {
       })
       .collect();
     self.training_labels = labels.to_vec();
+    // Number of clusters (sqrt of N is a good rule of thumb, so ~775 for 600k)
+    let k = (data.len() as f64).sqrt() as usize; 
+    
+    // A. Pick initial centroids (just take the first K articles for simplicity)
+    let mut centroids: Vec<SparseVector> = data.iter().take(k).cloned().collect();
+    
+    // B. Create "Buckets" to hold indices of articles
+    // buckets[centroid_index] = Vec<article_index>
+    let mut buckets: Vec<Vec<usize>> = vec![vec![]; k];
 
+    // C. Assign every article to the nearest centroid (Single Pass)
+    for (article_idx, article) in data.iter().enumerate() {
+        let mut best_centroid = 0;
+        let mut max_sim = -1.0;
+
+        for (c_idx, centroid) in centroids.iter().enumerate() {
+            let sim = cosine_similarity_full(article, centroid);
+            if sim > max_sim {
+                max_sim = sim;
+                best_centroid = c_idx;
+            }
+        }
+        buckets[best_centroid].push(article_idx);
+    }
+
+    // D. Recalculate Centroids as the Mean of their buckets
+    for (c_idx, article_indices) in buckets.iter().enumerate() {
+        if article_indices.is_empty() { continue; }
+        
+        let mut mean_map: HashMap<u16, f32> = HashMap::new();
+        let count = article_indices.len() as f32;
+
+        for &idx in article_indices {
+            for (&dim, &val) in &data[idx] {
+                *mean_map.entry(dim).or_insert(0.0) += val as f32 / count;
+            }
+        }
+        
+        // Update centroid with the new mean
+        centroids[c_idx] = mean_map; 
+    }
+
+    // Store these in your struct for use during 'predict'
+    self.centroids = centroids;
+    self.buckets = buckets;
     Ok(())
   }
 
@@ -106,7 +186,7 @@ impl KNearestNeighbors {
     // Return the unique labels found in the top K
     counts.into_keys().collect()
   }
-  pub fn predict_dot_old(&self, data_point: &SparseVector) -> Vec<u16> {
+  pub fn predict_new(&self, data_point: &SparseVector) -> Vec<u16> {
     // 1. Initialize a Max-Heap with capacity K
     let mut heap: BinaryHeap<(OrderedFloat<f64>, usize)> = BinaryHeap::with_capacity(self.k);
 
@@ -145,27 +225,9 @@ impl KNearestNeighbors {
         |mut heap1, mut heap2| {
           // Merge the heaps from different threads
           heap1.append(&mut heap2);
-          // ... trim heap1 back to size K ...
           heap1
         },
       );
-    //  .for_each( |(i, train_vec)|{
-    //   // let dist = OrderedFloat(train_vec.euclidean_distance(data_point));
-    //   let dist = OrderedFloat(dot_product(data_point, train_vec, self.normalized_magnitudes[i]));
-    //   if heap.len() < self.k {
-    //     // Still filling up the initial K slots
-    //     heap.push((dist, i));
-    //   } else {
-    //     // Heap is full. Check if current distance is better than the "worst of the best"
-    //     if let Some(mut top) = heap.peek_mut() {
-    //       if dist < top.0 {
-    //         // This new point is closer! Replace the furthest neighbor in our heap.
-    //         top.0 = dist;
-    //         top.1 = i;
-    //       }
-    //     }
-    //   }
-    // } );
 
     // 3. Voting Logic (Heap now contains exactly the K closest neighbors)
     let mut counts = HashMap::new();
@@ -176,79 +238,5 @@ impl KNearestNeighbors {
     }
 
     counts.into_keys().collect()
-  }
-
-  pub fn predict_new(&self, data_point: &SparseVector) -> Vec<u16> {
-    use std::cmp::Reverse;
-
-    // Use a Min-Heap (via Reverse) to keep the K largest similarities
-    // Or keep track of K smallest distances if using euclidean_distance
-    let heap = self
-      .training_data
-      .par_iter()
-      .enumerate()
-      .fold(
-        || BinaryHeap::with_capacity(self.k),
-        |mut heap: BinaryHeap<(Reverse<OrderedFloat<f64>>, usize)>, (i, train_vec)| {
-          // For cosine similarity (larger is better), we want to keep the K largest
-          let similarity = dot_product(data_point, train_vec, self.normalized_magnitudes[i]);
-          let score = Reverse(OrderedFloat(similarity));
-
-          // Or for euclidean distance (smaller is better):
-          // let distance = train_vec.euclidean_distance(data_point);
-          // let score = OrderedFloat(distance);  // No Reverse needed
-
-          if heap.len() < self.k {
-            heap.push((score, i));
-          } else if let Some(worst) = heap.peek() {
-            // For similarity: if new similarity is LARGER than worst (smallest) in heap
-            if score > worst.0 {
-              heap.pop();
-              heap.push((score, i));
-            }
-          }
-          heap
-        },
-      )
-      .reduce(
-        || BinaryHeap::with_capacity(self.k),
-        |mut heap1, heap2| {
-          // Merge heap2 into heap1, keeping only K best
-          for item in heap2 {
-            if heap1.len() < self.k {
-              heap1.push(item);
-            } else if let Some(worst) = heap1.peek() {
-              if item.0 > worst.0 {
-                heap1.pop();
-                heap1.push(item);
-              }
-            }
-          }
-          heap1
-        },
-      );
-
-    // Voting logic
-    let threshold = 0.3;
-    let final_neighbors_count = heap.len();
-    let mut counts = HashMap::new();
-    for (_, idx) in heap {
-      for label in &self.training_labels[idx] {
-        *counts.entry(*label).or_insert(0) += 1;
-      }
-    }
-
-    counts
-      .into_iter()
-      .filter_map(|(label, count)| {
-        let confidence = count as f64 / final_neighbors_count as f64;
-        if confidence >= threshold {
-          Some(label)
-        } else {
-          None
-        }
-      })
-      .collect()
-    // counts.into_keys().collect()
   }
 }
