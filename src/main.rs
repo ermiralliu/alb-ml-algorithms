@@ -1,7 +1,9 @@
 pub mod machine_learning;
-use std::{collections::HashMap, hash::Hash};
+pub mod map_category;
+use std::collections::HashMap;
 
-use rand::{Rng, rng};
+use machine_learning::{bnb, mnnb};
+use map_category::category_name_for_group_id;
 use rkyv::{Archive, Deserialize, Serialize};
 use rustc_hash::FxBuildHasher;
 
@@ -9,9 +11,8 @@ use crate::machine_learning::{
   knn_hashmap::{KNearestNeighbors, SparseVector},
   knn_tfidf,
 };
-use fst::raw::Fst;
 
-const FST_CATEGORY_DATA: &[u8] = include_bytes!("../data/categories.bin");
+// const FST_CATEGORY_DATA: &[u8] = include_bytes!("../data/categories.bin");
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
 #[rkyv(
@@ -21,47 +22,72 @@ const FST_CATEGORY_DATA: &[u8] = include_bytes!("../data/categories.bin");
     derive(Debug),
 )]
 
-struct Data {
+struct DataU16 {
   matrix: Vec<Vec<u16>>,
 }
 
-fn remove_first_occurrence(vec: &mut Vec<u16>, target: u16) {
-  if let Some(pos) = vec.iter().position(|&x| x == target) {
-    vec.remove(pos);
-  }
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
+#[rkyv(
+    // This will generate a PartialEq impl between archived and normal types
+    compare(PartialEq),
+    // bytecheck can be used to validate your data if you want
+    derive(Debug),
+)]
+
+struct DataU8 {
+  matrix: Vec<Vec<u8>>,
 }
+
+// fn remove_first_occurrence(vec: &mut Vec<u16>, target: u16) {
+//   if let Some(pos) = vec.iter().position(|&x| x == target) {
+//     vec.remove(pos);
+//   }
+// }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   println!("Hello, world!");
-  let fst_categories = Fst::new(FST_CATEGORY_DATA).unwrap();
-  let file_bytes_categories = std::fs::read("out/albanian_test_categories.rkyv")?;
+  // let fst_categories = Fst::new(FST_CATEGORY_DATA).unwrap();
+  let file_bytes_categories = std::fs::read("out/albanian_test_categories_1.rkyv")?;
   let categories_archived =
-    rkyv::access::<ArchivedData, rkyv::rancor::Error>(&file_bytes_categories)?;
-  let categories_matrix: Data =
-    rkyv::deserialize::<Data, rkyv::rancor::Error>(categories_archived)?;
-  let (map_of_word_usages, mut categories_matrix): (Vec<SparseVector>, Vec<Vec<u16>>) = {
-    let file_bytes_articles = std::fs::read("out/albanian_test.rkyv")?;
+    rkyv::access::<ArchivedDataU8, rkyv::rancor::Error>(&file_bytes_categories)?;
+  let categories_matrix: DataU8 =
+    rkyv::deserialize::<DataU8, rkyv::rancor::Error>(categories_archived)?;
+  let (map_of_word_usages, mut categories_matrix): (Vec<SparseVector>, Vec<Vec<u8>>) = {
+    let file_bytes_articles = std::fs::read("out/albanian_test_1.rkyv")?;
     let articles_archived =
-      rkyv::access::<ArchivedData, rkyv::rancor::Error>(&file_bytes_articles)?;
-    let article_matrix = rkyv::deserialize::<Data, rkyv::rancor::Error>(articles_archived)?;
-    let (article_matrix, categories_matrix): (Vec<Vec<u16>>, Vec<Vec<u16>>) = article_matrix
+      rkyv::access::<ArchivedDataU16, rkyv::rancor::Error>(&file_bytes_articles)?;
+    let article_matrix = rkyv::deserialize::<DataU16, rkyv::rancor::Error>(articles_archived)?;
+    let (article_matrix, categories_matrix): (Vec<Vec<u16>>, Vec<Vec<u8>>) = article_matrix
       .matrix
       .into_iter()
-      .zip(categories_matrix.matrix.into_iter())
-      // .map(|(article, mut category)| {
-      //   remove_first_occurrence(&mut category, 260);
-      //   remove_first_occurrence(&mut category, 381);
-      //   remove_first_occurrence(&mut category, 327);
-      //   (article, category)
-      // })
-      // .filter(|(_article, category)| !(category.len() == 0) && rand::random_bool(0.1))
-      // .skip(60000)
-      // .take(60000)
+      .zip(categories_matrix.matrix.into_iter()) // Zip the outer Vecs
+      .map(|(article, category)| {
+        // 2. Map the individual category IDs within this row
+        let mapped_category: Vec<u8> = category;
+          // category.into_iter().map(|id| map_category_id(id)).unique().collect(); // You MUST collect here so it's a Vec<u16>, not an iterator
+
+        (article, mapped_category)
+      })
       .unzip();
+    // .matrix
+    // .into_iter()
+    //
+    // .zip(categories_matrix.matrix.into_iter().map(|x|  x.iter().map(|y| map_category_id(*y)).into_iter()).into_iter())
+    // .map(|(article, mut category)| {
+    // remove_first_occurrence(&mut category, 260);
+    //   remove_first_occurrence(&mut category, 381);
+    //   remove_first_occurrence(&mut category, 327);
+    //   (article, category)
+    // })
+    // .filter(|(_article, category)| !(category.len() == 0) && rand::random_bool(0.1))
+    // .skip(60000)
+    // .take(60000)
+    // .unzip();
     let article_matrix = article_matrix.iter().map(|x| vectorize_sparse(x)).collect();
     (article_matrix, categories_matrix)
   };
   println!("Data size: {}", map_of_word_usages.len());
+  // KNN TEST BELOW
   // let mut knn_test = KNearestNeighbors::new_with_k(3);
 
   let mut tfidf_transformer = TfidfTransformer::new();
@@ -71,13 +97,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .map(|article| tfidf_transformer.transform(article))
     .collect();
 
-  let mut knn_test = knn_tfidf::KNearestNeighbors::new_with_k(3);
+  let mut knn_test = knn_tfidf::KNearestNeighbors::new_with_k(2);
   knn_test.train(&bag, &categories_matrix)?;
-
+  //
   // knn_test.train(&map_of_word_usages, &categories_matrix.matrix)?;
   // let data_point = &article_matrix.matrix[0];
   // knn_test.predict(data_point);
-  // 1. Define your test set (using a slice of your data)
+  // Multinomial naive bayes below:
+  // let mut mnnb_v = bnb::MultiLabelNB::new(1.0);
+  // mnnb_v.train(&map_of_word_usages, &categories_matrix);
+
   let test_data = &map_of_word_usages;
   let test_labels = &mut categories_matrix;
 
@@ -86,27 +115,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   for i in 0..50 {
     let mut actual_label = &mut test_labels[i];
+    // knn
     let tfidf_transformed_test_data = tfidf_transformer.transform(&test_data[i]);
+
+    // println!("\n=== Testing point {} ===", i);
+    // println!("Test vector: {:?}", tfidf_transformed_test_data);
+    // println!("Train vector {}: {:?}", i, bag[i]);
+    // println!("Are they equal? {}", (tfidf_transformed_test_data == bag[i]));
+    // KNN
     let mut prediction = knn_test.predict_new(&tfidf_transformed_test_data);
+    // MNNB
+    // let mut prediction = mnnb_v.predict(&map_of_word_usages[i]);
     correct_predictions += jaccard_similarity(&mut prediction, &mut actual_label);
     {
-      let actual_label_arr: Vec<Vec<u8>> = actual_label
+      // let actual_label_arr: Vec<Vec<u8>> = actual_label
+      //   .iter()
+      //   .map(|x| fst_categories.get_key(*x as u64))
+      //   .flatten()
+      //   .collect();
+      // let actual_label_str: Vec<&str> = actual_label_arr
+      //   .iter()
+      //   .map(|x| unsafe { std::str::from_utf8_unchecked(&x) })
+      //   .collect();
+      let actual_label_str: Vec<&str> = actual_label
         .iter()
-        .map(|x| fst_categories.get_key(*x as u64))
-        .flatten()
+        .map(|x| category_name_for_group_id(*x))
         .collect();
-      let actual_label_str: Vec<&str> = actual_label_arr
+      // let prediction_label_arr: Vec<Vec<u8>> = prediction
+      //   .iter()
+      //   .map(|x| fst_categories.get_key(*x as u64))
+      //   .flatten()
+      //   .collect();
+      // let prediction_label_str: Vec<&str> = prediction_label_arr
+      //   .iter()
+      //   .map(|x| unsafe { std::str::from_utf8_unchecked(x) })
+      //   .collect();
+      let prediction_label_str: Vec<&str> = prediction
         .iter()
-        .map(|x| unsafe { std::str::from_utf8_unchecked(&x) })
-        .collect();
-      let prediction_label_arr: Vec<Vec<u8>> = prediction
-        .iter()
-        .map(|x| fst_categories.get_key(*x as u64))
-        .flatten()
-        .collect();
-      let prediction_label_str: Vec<&str> = prediction_label_arr
-        .iter()
-        .map(|x| unsafe { std::str::from_utf8_unchecked(x) })
+        .map(|x| category_name_for_group_id(*x))
         .collect();
       println!(
         "Prediction: {:?},\nActual label: {:?}",
@@ -153,7 +199,7 @@ fn vectorize_sparse(sequence: &[u16]) -> SparseVector {
 
   sparse_vec
 }
-pub fn jaccard_similarity(a: &mut Vec<u16>, b: &mut Vec<u16>) -> f64 {
+pub fn jaccard_similarity(a: &mut Vec<u8>, b: &mut Vec<u8>) -> f64 {
   if a.is_empty() && b.is_empty() {
     return 1.0;
   }
@@ -198,22 +244,22 @@ impl TfidfTransformer {
     }
   }
   /// Step 1: Learn the IDF weights from the training corpus
-  // pub fn fit(&mut self, training_data: &[SparseVector]) {
-  //   self.total_docs = training_data.len();
-  //   let mut doc_counts: HashMap<u16, usize, FxBuildHasher> = HashMap::default();
+  pub fn fit(&mut self, training_data: &[SparseVector]) {
+    self.total_docs = training_data.len();
+    let mut doc_counts: HashMap<u16, usize, FxBuildHasher> = HashMap::default();
 
-  //   for vec in training_data {
-  //     for &word_id in vec.keys() {
-  //       *doc_counts.entry(word_id).or_insert(0) += 1;
-  //     }
-  //   }
+    for vec in training_data {
+      for &word_id in vec.keys() {
+        *doc_counts.entry(word_id).or_insert(0) += 1;
+      }
+    }
 
-  //   for (word_id, count) in doc_counts {
-  //     // Formula: idf = log(Total Docs / Docs containing word)
-  //     let idf_val = (self.total_docs as f32 / count as f32).ln();
-  //     self.idf.insert(word_id, idf_val);
-  //   }
-  // }
+    for (word_id, count) in doc_counts {
+      // Formula: idf = log(Total Docs / Docs containing word)
+      let idf_val = (self.total_docs as f32 / count as f32).ln();
+      self.idf.insert(word_id, idf_val);
+    }
+  }
   // pub fn fit(&mut self, training_data: &[SparseVector]) {
   //   self.total_docs = training_data.len();
   //   let mut doc_counts: HashMap<u16, usize, FxBuildHasher> = HashMap::default();
@@ -241,16 +287,16 @@ impl TfidfTransformer {
   //     .collect();
   // }
   /// Step 2: Convert a frequency vector into a weighted TF-IDF vector
-  // pub fn transform(&self, input: &SparseVector) -> TfidfBag {
-  //   let mut tfidf_vec = HashMap::default();
-  //   for (word_id, count) in input {
-  //     if let Some(idf_val) = self.idf.get(word_id) {
-  //       // TF-IDF = (count) * (idf)
-  //       tfidf_vec.insert(*word_id, (*count as f32) * idf_val);
-  //     }
-  //   }
-  //   tfidf_vec
-  // }
+  pub fn transform(&self, input: &SparseVector) -> TfidfBag {
+    let mut tfidf_vec = HashMap::default();
+    for (word_id, count) in input {
+      if let Some(idf_val) = self.idf.get(word_id) {
+        // TF-IDF = (count) * (idf)
+        tfidf_vec.insert(*word_id, (*count as f32) * idf_val);
+      }
+    }
+    tfidf_vec
+  }
   //   pub fn transform(&self, input: &SparseVector) -> TfidfBag {
   //     let mut tfidf_vec = HashMap::default();
   //     let mut norm_sq = 0.0;
@@ -284,78 +330,78 @@ impl TfidfTransformer {
 
   //     tfidf_vec
   // }
-  pub fn fit(&mut self, training_data: &[SparseVector]) {
-    self.total_docs = training_data.len();
-    if self.total_docs == 0 { return; }
+  //   pub fn fit(&mut self, training_data: &[SparseVector]) {
+  //     self.total_docs = training_data.len();
+  //     if self.total_docs == 0 { return; }
 
-    let mut doc_counts: HashMap<u16, usize, FxBuildHasher> = HashMap::default();
+  //     let mut doc_counts: HashMap<u16, usize, FxBuildHasher> = HashMap::default();
 
-    // 1. Count document frequency (DF) for each word
-    for vec in training_data {
-        for &word_id in vec.keys() {
-            *doc_counts.entry(word_id).or_insert(0) += 1;
-        }
-    }
+  //     // 1. Count document frequency (DF) for each word
+  //     for vec in training_data {
+  //         for &word_id in vec.keys() {
+  //             *doc_counts.entry(word_id).or_insert(0) += 1;
+  //         }
+  //     }
 
-    // 2. Set sensible bounds
-    // If you have 100 docs, max_df is 90. If you have 10 docs, max_df is 9.
-    let max_df = (self.total_docs as f32 * 0.9) as usize;
-    // Ensure min_df is at least 1, but usually 2+ to filter unique typos/noise
-    let min_df = 1; 
+  //     // 2. Set sensible bounds
+  //     // If you have 100 docs, max_df is 90. If you have 10 docs, max_df is 9.
+  //     let max_df = (self.total_docs as f32 * 0.9) as usize;
+  //     // Ensure min_df is at least 1, but usually 2+ to filter unique typos/noise
+  //     let min_df = 1;
 
-    // 3. Calculate IDF with Smoothing
-    self.idf = doc_counts
-        .into_iter()
-        .filter(|(_, count)| {
-            // Only filter if we have enough data to make filtering meaningful
-            if self.total_docs > 10 {
-                *count <= max_df && *count >= min_df
-            } else {
-                true // Keep everything for tiny datasets
-            }
-        })
-        .map(|(word_id, count)| {
-            // Smoothed IDF: ln((N + 1) / (df + 1)) + 1
-            // The "+ 1" outside the log ensures words with df = N still have a weight > 0
-            let idf_val = ((self.total_docs as f32 + 1.0) / (count as f32 + 1.0)).ln() + 1.0;
-            (word_id, idf_val)
-        })
-        .collect();
+  //     // 3. Calculate IDF with Smoothing
+  //     self.idf = doc_counts
+  //         .into_iter()
+  //         .filter(|(_, count)| {
+  //             // Only filter if we have enough data to make filtering meaningful
+  //             if self.total_docs > 10 {
+  //                 *count <= max_df && *count >= min_df
+  //             } else {
+  //                 true // Keep everything for tiny datasets
+  //             }
+  //         })
+  //         .map(|(word_id, count)| {
+  //             // Smoothed IDF: ln((N + 1) / (df + 1)) + 1
+  //             // The "+ 1" outside the log ensures words with df = N still have a weight > 0
+  //             let idf_val = ((self.total_docs as f32 + 1.0) / (count as f32 + 1.0)).ln() + 1.0;
+  //             (word_id, idf_val)
+  //         })
+  //         .collect();
 
-    // Debugging: check how many words survived the "purge"
-    println!("Vocabulary size after fit: {}", self.idf.len());
-}
-  pub fn transform(&self, input: &SparseVector) -> TfidfBag {
-    let mut tfidf_vec = HashMap::default();
-    let mut norm_sq = 0.0;
+  //     // Debugging: check how many words survived the "purge"
+  //     println!("Vocabulary size after fit: {}", self.idf.len());
+  // }
+  //   pub fn transform(&self, input: &SparseVector) -> TfidfBag {
+  //     let mut tfidf_vec = HashMap::default();
+  //     let mut norm_sq = 0.0;
 
-    for (word_id, count) in input {
-      if let Some(&idf_val) = self.idf.get(word_id) {
-        // Ensure count > 0 to avoid ln(0)
-        let tf = if *count > 0 {
-          1.0 + (*count as f32).ln()
-        } else {
-          0.0
-        };
-        let val = tf * idf_val;
+  //     for (word_id, count) in input {
+  //       if let Some(&idf_val) = self.idf.get(word_id) {
+  //         // Ensure count > 0 to avoid ln(0)
+  //         let tf = if *count > 0 {
+  //           1.0 + (*count as f32).ln()
+  //         } else {
+  //           0.0
+  //         };
+  //         let val = tf * idf_val;
 
-        if val > 0.0 {
-          tfidf_vec.insert(*word_id, val);
-          norm_sq += val * val;
-        }
-      }
-    }
+  //         if val > 0.0 {
+  //           tfidf_vec.insert(*word_id, val);
+  //           norm_sq += val * val;
+  //         }
+  //       }
+  //     }
 
-    if norm_sq > 0.0 {
-      let inv_norm = 1.0 / norm_sq.sqrt();
-      for val in tfidf_vec.values_mut() {
-        *val *= inv_norm;
-      }
-    } else {
-      // If this hits, your KNN will definitely fail.
-      eprintln!("Warning: Query has no words matching the trained vocabulary.");
-    }
+  //     if norm_sq > 0.0 {
+  //       let inv_norm = 1.0 / norm_sq.sqrt();
+  //       for val in tfidf_vec.values_mut() {
+  //         *val *= inv_norm;
+  //       }
+  //     } else {
+  //       // If this hits, your KNN will definitely fail.
+  //       eprintln!("Warning: Query has no words matching the trained vocabulary.");
+  //     }
 
-    tfidf_vec
-  }
+  //     tfidf_vec
+  //   }
 }

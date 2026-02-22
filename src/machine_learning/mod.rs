@@ -9,6 +9,8 @@ pub mod naive_bayes_incremental;
 pub mod support_vector_machine;
 pub mod knn_hashmap;
 pub mod knn_tfidf;
+pub mod mnnb;
+pub mod bnb;
 
 pub trait MachineLearningModel<I, O> {
   /// A function to create a new, uninitialized instance of the model.
